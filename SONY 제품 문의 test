@@ -1,0 +1,111 @@
+import os
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from sentence_transformers import SentenceTransformer
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from sklearn.metrics.pairwise import cosine_similarity
+from langchain_community.tools.tavily_search import TavilySearchResults
+
+# 장치 설정 (GPU 또는 CPU)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
+
+# 웹 검색 설정 (Tavily API)
+os.environ["TAVILY_API_KEY"] = "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"  # API 키 입력
+web_search_tool = TavilySearchResults(k=2)
+
+# 벡터 저장소 설정
+directory_path = '/home/work/DY/SONY/vectorstore'
+embedding_model = HuggingFaceEmbeddings(model_name='BAAI/bge-m3', model_kwargs={'device': device})
+vectorstore = Chroma(persist_directory=directory_path, embedding_function=embedding_model)
+retriever = vectorstore.as_retriever(search_kwargs={'k': 5})
+
+# 유사도 모델 설정
+similarity_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+
+# KoAlpaca 모델 설정 (로컬 경로 사용)
+model_name = "/home/work/DY/KoAlpaca-llama-1-7b"  # 로컬 모델 경로
+tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+
+# Option 1: Use device_map="auto" (Recommended for large models)
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    device_map="auto",  # Automatically distribute model across GPU and CPU
+    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    offload_folder="offload"  # Specify folder for offloading if necessary
+)
+
+# Option 2: Load entire model on GPU (Requires sufficient GPU memory)
+# model = AutoModelForCausalLM.from_pretrained(
+#     model_name,
+#     torch_dtype=torch.float16,
+# ).to(device)
+
+def get_answer_with_web_search(query, product_name):
+    # 관련 문서 검색
+    all_docs = retriever.get_relevant_documents(query)
+
+    # 제품명 필터링
+    product_embedding = similarity_model.encode(product_name)
+    doc_embeddings = similarity_model.encode(
+        [doc.metadata.get("file_name", "").split('.')[0] for doc in all_docs]
+    )
+    filtered_docs = [
+        doc for doc, sim in zip(all_docs, cosine_similarity([product_embedding], doc_embeddings)[0])
+        if sim >= 0.7
+    ]
+
+    # 관련 문서가 없는 경우 웹 검색 실행
+    if not filtered_docs:
+        web_results = web_search_tool.invoke(query)
+        if isinstance(web_results, list) and web_results:  # 결과가 리스트인지 확인
+            snippets = [
+                result.get('snippet', '').strip() for result in web_results if result.get('snippet', '').strip()
+            ]
+            if snippets:
+                return (
+                    "문서에서 찾지 못한 결과를 웹 검색에서 반환합니다:\n" + "\n".join(snippets),
+                    "출처: 웹 검색"
+                )
+            else:
+                return "문서 및 웹 검색에서 관련 정보를 찾을 수 없습니다."
+
+    # 문서 내용 기반 응답 생성
+    context = "\n".join([doc.page_content for doc in filtered_docs])
+
+    # 문맥 정제
+    sentences = list(set(context.splitlines()))
+    refined_context = "\n".join([s for s in sentences if len(s.strip()) > 20])
+
+    # SLLM 프롬프트 작성
+    sllm_prompt = (
+        f"다음은 문서에서 추출된 관련 정보입니다:\n\n{refined_context}\n\n"
+        f"사용자의 질문은 '{query}'입니다.\n"
+        "문서 내용을 바탕으로 간결하고 자연스러운 답변을 작성해 주세요."
+    )
+
+    # 모델 추론
+    inputs = tokenizer(sllm_prompt, return_tensors="pt", truncation=True, max_length=512).to(device)
+    outputs = model.generate(inputs["input_ids"], max_new_tokens=200, do_sample=False)
+    answer = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+
+    # 메타데이터 정리
+    source_info = "\n".join([
+        f"출처 - 파일명: {doc.metadata.get('file_name')}, 페이지 번호: {doc.metadata.get('page_number')}"
+        for doc in filtered_docs
+    ])
+
+    return answer, source_info
+
+# 실행 예제
+query = "사운드 스피커 블루투스 연결 해제 어떻게 해?"
+product_name = "글래스 사운드 스피커 LSPX-S3"
+answer, source_info = get_answer_with_web_search(query, product_name)
+
+# 결과 출력
+print("Query:", query)
+print("Answer:", answer)
+print("Source Information:")
+print(source_info)
+
