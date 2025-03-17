@@ -1,0 +1,68 @@
+import os
+import warnings
+from langchain_community.document_loaders import PyMuPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import Chroma
+from langchain_community.chat_models import ChatOllama
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+
+warnings.filterwarnings("ignore")
+
+
+# PDF 파일 경로 리스트
+pdf_files = [
+    "/home/work/DY/SONY/글래스 사운드 스피커 LSPX-S3.pdf",
+    "/home/work/DY/SONY/디지털 카메라 ZV-1M2.pdf",
+    "/home/work/DY/SONY/렌즈 교환 가능 디지털 카메라 ILCE-7CM2.pdf",
+    "/home/work/DY/SONY/무선 노이즈 제거 스테레오 헤드셋 WF-1000XM5.pdf",
+    "/home/work/DY/SONY/무선 노이즈 제거 스테레오 헤드셋 WH-1000XM5.pdf",
+    "/home/work/DY/SONY/무선 스테레오 헤드셋 Float Run.pdf",
+    "/home/work/DY/SONY/무선 스피커 SRS-XE300.pdf"    
+]
+
+# 여러 PDF 파일을 로드하여 문서 리스트 생성
+docs = []
+for pdf_file in pdf_files:
+    loader = PyMuPDFLoader(pdf_file)
+    pages = loader.load()
+    for page_num, page in enumerate(pages):
+        # 파일명에서 확장자를 제거하여 간단한 형식으로 처리
+        base_name = os.path.splitext(os.path.basename(pdf_file))[0]
+        # 각 페이지에 파일명과 페이지 번호 메타데이터 추가
+        page.metadata["file_name"] = base_name
+        page.metadata["page_number"] = page_num + 1
+        docs.append(page)
+
+# 메타데이터 확인
+for doc in docs:
+    print(f"파일명: {doc.metadata['file_name']}, 페이지 번호: {doc.metadata['page_number']}")
+
+# 문서를 문장으로 분리
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50,
+)
+split_docs = text_splitter.split_documents(docs)
+
+import tensorflow as tf
+print("Available GPUs:", tf.config.list_physical_devices('GPU'))
+
+
+# 문장을 임베딩으로 변환하고 벡터 저장소에 저장
+embeddings = HuggingFaceEmbeddings(
+    model_name='BAAI/bge-m3',
+    model_kwargs={'device': 'cuda'},
+    encode_kwargs={'normalize_embeddings': True},
+)
+
+
+# 벡터 저장소 생성 및 저장
+vectorstore_path = '/home/work/DY/SONY/vectorstore'
+os.makedirs(vectorstore_path, exist_ok=True)
+vectorstore = Chroma.from_documents(split_docs, embeddings, persist_directory=vectorstore_path)
+vectorstore.persist()
+print("Vectorstore created and persisted")
+
